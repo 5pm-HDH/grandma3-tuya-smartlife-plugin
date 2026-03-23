@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GMA3 DataVersion="0.8.84.0">
+    <UserPlugin Name="SmartLife RGB" Version="0.1.0.0" Path="smartlife_rgb">
+        <ComponentLua Name="smartlife_rgb" FileName="smartlife_rgb.lua" />
+    </UserPlugin>
+</GMA3>
