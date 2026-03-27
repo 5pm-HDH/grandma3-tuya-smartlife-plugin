@@ -9,20 +9,14 @@ The plugin supports two setup paths:
 
 ## Prerequisites
 
-Before using this plugin, complete the TinyTuya setup wizard so you have the device information it exports.
+Before using this plugin, complete the TinyTuya setup flow so you have the device information it exports.
 
 - TinyTuya project: https://github.com/jasonacox/tinytuya
 - Run the TinyTuya setup flow first
 - Obtain the exported `devices.json` / `snapshot.json`
-- Use that data to import `snapshot.json` into this plugin, or copy the IP / device ID / local key into a manual device entry
+- Import `snapshot.json` into this plugin, or copy the IP / device ID / local key into a manual device entry
 
-The TinyTuya cloud/setup workflow is intentionally not duplicated here. Run TinyTuya's setup flow first to obtain your device data, especially the local keys and exported device JSON files.
-
-TinyTuya project:
-
-- https://github.com/jasonacox/tinytuya
-
-Before using this plugin, complete the TinyTuya wizard/setup so you have the device information it exports. In practice that means obtaining the `devices.json` / `snapshot.json` data from TinyTuya first, then importing `snapshot.json` into this plugin or entering the IP / device ID / local key manually.
+The TinyTuya cloud/setup workflow is intentionally not duplicated here.
 
 ## Files
 
@@ -73,9 +67,9 @@ $HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv/bi
 If you want to create the venv manually, the steps are:
 
 ```bash
-python3 -m venv $HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv
-$HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv/bin/python -m pip install --upgrade pip
-$HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv/bin/python -m pip install tinytuya
+python3 -m venv "$HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv"
+"$HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv/bin/python" -m pip install --upgrade pip
+"$HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv/bin/python" -m pip install tinytuya
 ```
 
 If grandMA3 ever points at the wrong interpreter, run the plugin and use `Set Python path`, or call:
