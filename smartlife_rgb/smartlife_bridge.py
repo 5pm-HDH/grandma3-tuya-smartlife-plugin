@@ -145,9 +145,7 @@ def persist_device_version(config_path: Path, config: dict[str, Any], device_id:
         save_json_file(config_path, config)
 
 
-def resolve_bulb(config_path: Path, config: dict[str, Any], selector: str | None):
-    device = find_device(config, selector)
-
+def ordered_versions_for(device: dict[str, Any]) -> list[str]:
     ordered_versions = []
     preferred = normalize_version(device.get("version"))
     if preferred:
@@ -155,15 +153,24 @@ def resolve_bulb(config_path: Path, config: dict[str, Any], selector: str | None
     for candidate in VERSION_CANDIDATES:
         if candidate not in ordered_versions:
             ordered_versions.append(candidate)
+    return ordered_versions
+
+
+def remember_version(config_path: Path, config: dict[str, Any], device: dict[str, Any], version: str) -> None:
+    if device.get("version") != version:
+        device["version"] = version
+        persist_device_version(config_path, config, device["id"], version)
+
+
+def resolve_bulb(config_path: Path, config: dict[str, Any], selector: str | None):
+    device = find_device(config, selector)
 
     last_status = None
-    for version in ordered_versions:
+    for version in ordered_versions_for(device):
         bulb = make_bulb(device, version=version)
         status = bulb.status()
         if not is_error_payload(status):
-            if device.get("version") != version:
-                device["version"] = version
-                persist_device_version(config_path, config, device["id"], version)
+            remember_version(config_path, config, device, version)
             return device, bulb, status
         last_status = status
 
@@ -176,6 +183,27 @@ def ensure_ok_result(result: Any, action: str) -> Any:
     if is_error_payload(result):
         raise RuntimeError(f"{action} failed: {result}")
     return result
+
+
+def execute_with_version_fallback(config_path: Path, config: dict[str, Any], selector: str | None, action_name: str, fn):
+    device = find_device(config, selector)
+    versions = ordered_versions_for(device)
+    last_error = None
+
+    for index, version in enumerate(versions):
+        bulb = make_bulb(device, version=version)
+        result = fn(bulb)
+        if not is_error_payload(result):
+            remember_version(config_path, config, device, version)
+            return device, bulb, result
+
+        last_error = result
+        if index == 0:
+            continue
+
+    raise RuntimeError(
+        f"{action_name} failed for {device['name']} at {device['ip']}: {last_error}"
+    )
 
 
 def command_list(config: dict[str, Any]) -> int:
@@ -248,31 +276,43 @@ def command_status(config_path: Path, config: dict[str, Any], selector: str | No
 
 
 def command_onoff(config_path: Path, config: dict[str, Any], selector: str | None, turn_on: bool) -> int:
-    device, bulb, _ = resolve_bulb(config_path, config, selector)
     if turn_on:
-        result = ensure_ok_result(bulb.turn_on(), "turn_on")
+        device, _, result = execute_with_version_fallback(
+            config_path, config, selector, "turn_on", lambda bulb: bulb.turn_on()
+        )
         message = f"Turned on {device['name']}"
     else:
-        result = ensure_ok_result(bulb.turn_off(), "turn_off")
+        device, _, result = execute_with_version_fallback(
+            config_path, config, selector, "turn_off", lambda bulb: bulb.turn_off()
+        )
         message = f"Turned off {device['name']}"
     return response(True, message, device=device, result=result)
 
 
 def command_rgb(config_path: Path, config: dict[str, Any], selector: str | None, r: int, g: int, b: int) -> int:
-    device, bulb, _ = resolve_bulb(config_path, config, selector)
-    ensure_ok_result(bulb.turn_on(), "turn_on")
-    result = ensure_ok_result(bulb.set_colour(r, g, b), "set_colour")
+    def apply_rgb(bulb):
+        result = bulb.turn_on()
+        if is_error_payload(result):
+            return result
+        return bulb.set_colour(r, g, b)
+
+    device, _, result = execute_with_version_fallback(
+        config_path, config, selector, "set_colour", apply_rgb
+    )
     return response(True, f"Set {device['name']} to rgb({r}, {g}, {b})", device=device, result=result)
 
 
 def command_white(
     config_path: Path, config: dict[str, Any], selector: str | None, brightness: int, colourtemp: int
 ) -> int:
-    device, bulb, _ = resolve_bulb(config_path, config, selector)
-    ensure_ok_result(bulb.turn_on(), "turn_on")
-    result = ensure_ok_result(
-        bulb.set_white_percentage(brightness=brightness, colourtemp=colourtemp),
-        "set_white_percentage",
+    def apply_white(bulb):
+        result = bulb.turn_on()
+        if is_error_payload(result):
+            return result
+        return bulb.set_white_percentage(brightness=brightness, colourtemp=colourtemp)
+
+    device, _, result = execute_with_version_fallback(
+        config_path, config, selector, "set_white_percentage", apply_white
     )
     return response(
         True,
