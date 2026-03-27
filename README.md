@@ -24,26 +24,51 @@ The TinyTuya cloud/setup workflow is intentionally not duplicated here.
 - `smartlife_rgb/smartlife_rgb.lua`
 - `smartlife_rgb/smartlife_bridge.py`
 - `install.sh`
+- `install.bat`
 
 ## Install
 
-Use the install helper:
+Use the install helper for your platform.
+
+macOS / Linux:
 
 ```bash
 ./install.sh
 ```
 
-This copies the plugin into your grandMA3 user plugin directory, creates a plugin-local Python virtualenv, installs TinyTuya into that virtualenv, and updates the plugin config so grandMA3 uses that interpreter.
+Windows:
 
-Default target:
+```bat
+install.bat
+```
+
+On Windows, you may need to run `install.bat` from an elevated Command Prompt or PowerShell session if writing to `C:\ProgramData` is blocked by permissions.
+
+The installer copies the plugin into your grandMA3 user plugin directory, creates a plugin-local Python virtualenv, installs TinyTuya into that virtualenv, and updates the plugin config so grandMA3 uses that interpreter.
+
+Default macOS target:
 
 `$HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/`
 
-If needed, override the target base or Python executable:
+Default Windows target:
+
+`C:\ProgramData\MALightingTechnology\gma3_library\datapools\plugins\smartlife_rgb\`
+
+If needed, override the target base or Python executable.
+
+macOS / Linux:
 
 ```bash
 GMA3_PLUGIN_BASE="$HOME/MALightingTechnology/gma3_library/datapools/plugins" ./install.sh
 PYTHON_BIN=/opt/homebrew/bin/python3 ./install.sh
+```
+
+Windows:
+
+```bat
+set GMA3_PLUGIN_BASE=C:\ProgramData\MALightingTechnology\gma3_library\datapools\plugins
+set PYTHON_BIN=py
+install.bat
 ```
 
 Then import the plugin XML from grandMA3 onPC if it is not already present.
@@ -56,12 +81,24 @@ The plugin is designed to use a dedicated virtualenv inside the installed plugin
 $HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv
 ```
 
+On Windows:
+
+```bat
+C:\ProgramData\MALightingTechnology\gma3_library\datapools\plugins\smartlife_rgb\.venv
+```
+
 That avoids Homebrew's externally-managed system Python restrictions and keeps the dependency isolated to this plugin.
 
 The install helper configures `settings.python` in `smartlife_rgb_config.json` to point at:
 
 ```bash
 $HOME/MALightingTechnology/gma3_library/datapools/plugins/smartlife_rgb/.venv/bin/python
+```
+
+On Windows:
+
+```bat
+C:\ProgramData\MALightingTechnology\gma3_library\datapools\plugins\smartlife_rgb\.venv\Scripts\python.exe
 ```
 
 If you want to create the venv manually, the steps are:
