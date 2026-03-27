@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+VERSION_CANDIDATES = ("3.4", "3.3", "3.5", "3.1")
+
 
 def response(ok: bool, message: str, **extra: Any) -> int:
     payload = {"ok": ok, "message": message}
@@ -117,15 +119,63 @@ def require_tinytuya():
     return tinytuya
 
 
-def make_bulb(device: dict[str, Any]):
+def is_error_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and ("Error" in payload or "Err" in payload)
+
+
+def make_bulb(device: dict[str, Any], version: str | None = None):
     tinytuya = require_tinytuya()
     bulb = tinytuya.BulbDevice(device["id"], device["ip"], device["key"])
-    bulb.set_version(float(device.get("version", "3.3")))
+    bulb.set_version(float(version or device.get("version", "3.3")))
     bulb.set_socketTimeout(3)
     bulb.set_socketRetryLimit(1)
     bulb.set_socketRetryDelay(0)
     bulb.set_socketPersistent(False)
     return bulb
+
+
+def persist_device_version(config_path: Path, config: dict[str, Any], device_id: str, version: str) -> None:
+    changed = False
+    for device in config["devices"]:
+        if device["id"] == device_id and device.get("version") != version:
+            device["version"] = version
+            changed = True
+            break
+    if changed:
+        save_json_file(config_path, config)
+
+
+def resolve_bulb(config_path: Path, config: dict[str, Any], selector: str | None):
+    device = find_device(config, selector)
+
+    ordered_versions = []
+    preferred = normalize_version(device.get("version"))
+    if preferred:
+        ordered_versions.append(preferred)
+    for candidate in VERSION_CANDIDATES:
+        if candidate not in ordered_versions:
+            ordered_versions.append(candidate)
+
+    last_status = None
+    for version in ordered_versions:
+        bulb = make_bulb(device, version=version)
+        status = bulb.status()
+        if not is_error_payload(status):
+            if device.get("version") != version:
+                device["version"] = version
+                persist_device_version(config_path, config, device["id"], version)
+            return device, bulb, status
+        last_status = status
+
+    raise RuntimeError(
+        f"Unable to communicate with {device['name']} at {device['ip']}: {last_status}"
+    )
+
+
+def ensure_ok_result(result: Any, action: str) -> Any:
+    if is_error_payload(result):
+        raise RuntimeError(f"{action} failed: {result}")
+    return result
 
 
 def command_list(config: dict[str, Any]) -> int:
@@ -187,10 +237,8 @@ def command_select(config_path: Path, config: dict[str, Any], selector: str) -> 
     return response(True, f"Selected {device['name']}", active_device=device["id"], device=device)
 
 
-def command_status(config: dict[str, Any], selector: str | None) -> int:
-    device = find_device(config, selector)
-    bulb = make_bulb(device)
-    raw_status = bulb.status()
+def command_status(config_path: Path, config: dict[str, Any], selector: str | None) -> int:
+    device, bulb, raw_status = resolve_bulb(config_path, config, selector)
     state: dict[str, Any] | None = None
     try:
         state = bulb.state()
@@ -199,33 +247,33 @@ def command_status(config: dict[str, Any], selector: str | None) -> int:
     return response(True, f"Fetched status for {device['name']}", device=device, status=raw_status, state=state)
 
 
-def command_onoff(config: dict[str, Any], selector: str | None, turn_on: bool) -> int:
-    device = find_device(config, selector)
-    bulb = make_bulb(device)
+def command_onoff(config_path: Path, config: dict[str, Any], selector: str | None, turn_on: bool) -> int:
+    device, bulb, _ = resolve_bulb(config_path, config, selector)
     if turn_on:
-        result = bulb.turn_on()
+        result = ensure_ok_result(bulb.turn_on(), "turn_on")
         message = f"Turned on {device['name']}"
     else:
-        result = bulb.turn_off()
+        result = ensure_ok_result(bulb.turn_off(), "turn_off")
         message = f"Turned off {device['name']}"
     return response(True, message, device=device, result=result)
 
 
-def command_rgb(config: dict[str, Any], selector: str | None, r: int, g: int, b: int) -> int:
-    device = find_device(config, selector)
-    bulb = make_bulb(device)
-    bulb.turn_on()
-    result = bulb.set_colour(r, g, b)
+def command_rgb(config_path: Path, config: dict[str, Any], selector: str | None, r: int, g: int, b: int) -> int:
+    device, bulb, _ = resolve_bulb(config_path, config, selector)
+    ensure_ok_result(bulb.turn_on(), "turn_on")
+    result = ensure_ok_result(bulb.set_colour(r, g, b), "set_colour")
     return response(True, f"Set {device['name']} to rgb({r}, {g}, {b})", device=device, result=result)
 
 
 def command_white(
-    config: dict[str, Any], selector: str | None, brightness: int, colourtemp: int
+    config_path: Path, config: dict[str, Any], selector: str | None, brightness: int, colourtemp: int
 ) -> int:
-    device = find_device(config, selector)
-    bulb = make_bulb(device)
-    bulb.turn_on()
-    result = bulb.set_white_percentage(brightness=brightness, colourtemp=colourtemp)
+    device, bulb, _ = resolve_bulb(config_path, config, selector)
+    ensure_ok_result(bulb.turn_on(), "turn_on")
+    result = ensure_ok_result(
+        bulb.set_white_percentage(brightness=brightness, colourtemp=colourtemp),
+        "set_white_percentage",
+    )
     return response(
         True,
         f"Set {device['name']} white brightness={brightness}% temp={colourtemp}%",
@@ -294,15 +342,15 @@ def main() -> int:
         if command == "select":
             return command_select(config_path, config, args.device)
         if command == "status":
-            return command_status(config, args.device)
+            return command_status(config_path, config, args.device)
         if command == "on":
-            return command_onoff(config, args.device, True)
+            return command_onoff(config_path, config, args.device, True)
         if command == "off":
-            return command_onoff(config, args.device, False)
+            return command_onoff(config_path, config, args.device, False)
         if command == "rgb":
-            return command_rgb(config, args.device, args.r, args.g, args.b)
+            return command_rgb(config_path, config, args.device, args.r, args.g, args.b)
         if command == "white":
-            return command_white(config, args.device, args.brightness, args.temp)
+            return command_white(config_path, config, args.device, args.brightness, args.temp)
         return response(False, f"Unknown command: {command}")
     except Exception as exc:
         return response(False, str(exc), error_type=exc.__class__.__name__)

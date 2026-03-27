@@ -5,10 +5,33 @@ local my_handle = select(4, ...)
 
 local json = require("json")
 
-local PLUGIN_DIR = GetPath(Enums.PathType.PluginLibrary) .. "/smartlife_rgb"
-local CONFIG_PATH = PLUGIN_DIR .. "/smartlife_rgb_config.json"
-local BRIDGE_PATH = PLUGIN_DIR .. "/smartlife_bridge.py"
-local RESULT_PATH = PLUGIN_DIR .. "/smartlife_bridge_result.json"
+local function join_path(base, leaf)
+    return tostring(base) .. "/" .. tostring(leaf)
+end
+
+local function file_exists(path)
+    return FileExists(path) == true
+end
+
+local function detect_plugin_dir()
+    local candidates = {
+        join_path(GetPath(Enums.PathType.Library), "datapools/plugins/smartlife_rgb"),
+        join_path(GetPath(Enums.PathType.PluginLibrary), "smartlife_rgb"),
+    }
+
+    for _, candidate in ipairs(candidates) do
+        if file_exists(join_path(candidate, "smartlife_bridge.py")) then
+            return candidate
+        end
+    end
+
+    return candidates[1]
+end
+
+local PLUGIN_DIR = detect_plugin_dir()
+local CONFIG_PATH = join_path(PLUGIN_DIR, "smartlife_rgb_config.json")
+local BRIDGE_PATH = join_path(PLUGIN_DIR, "smartlife_bridge.py")
+local RESULT_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_result.json")
 
 local function ensure_plugin_dir()
     CreateDirectoryRecursive(PLUGIN_DIR)
@@ -28,10 +51,6 @@ local function write_file(path, content)
     local handle = assert(io.open(path, "w"))
     handle:write(content)
     handle:close()
-end
-
-local function file_exists(path)
-    return FileExists(path) == true
 end
 
 local function load_config()
