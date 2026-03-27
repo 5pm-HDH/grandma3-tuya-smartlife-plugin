@@ -115,7 +115,6 @@ end
 
 local function show_success(message)
     Printf("SmartLife RGB: " .. tostring(message))
-    show_message("SmartLife RGB", tostring(message))
 end
 
 local function parse_cli_string(input)
