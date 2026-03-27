@@ -32,6 +32,7 @@ local PLUGIN_DIR = detect_plugin_dir()
 local CONFIG_PATH = join_path(PLUGIN_DIR, "smartlife_rgb_config.json")
 local BRIDGE_PATH = join_path(PLUGIN_DIR, "smartlife_bridge.py")
 local RESULT_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_result.json")
+local ASYNC_LOG_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_async.log")
 
 local function ensure_plugin_dir()
     CreateDirectoryRecursive(PLUGIN_DIR)
@@ -165,10 +166,10 @@ local function parse_cli_string(input)
     return command, params
 end
 
-local function run_helper(args)
+local function build_helper_command(args, output_path)
     local config = load_config()
     local python_path = config.settings.python or "python3"
-    local command = shell_quote(python_path)
+    return shell_quote(python_path)
         .. " "
         .. shell_quote(BRIDGE_PATH)
         .. " --config "
@@ -176,8 +177,12 @@ local function run_helper(args)
         .. " "
         .. args
         .. " > "
-        .. shell_quote(RESULT_PATH)
+        .. shell_quote(output_path)
         .. " 2>&1"
+end
+
+local function run_helper(args)
+    local command = build_helper_command(args, RESULT_PATH)
 
     os.remove(RESULT_PATH)
     os.execute(command)
@@ -194,12 +199,26 @@ local function run_helper(args)
     return payload
 end
 
+local function run_helper_async(args)
+    local command = build_helper_command(args, ASYNC_LOG_PATH)
+    os.execute("(" .. command .. ") >/dev/null 2>&1 &")
+    return { ok = true, message = "Command dispatched" }
+end
+
 local function helper_call(command, options)
     local parts = { command }
     for _, entry in ipairs(options or {}) do
         table.insert(parts, entry.flag .. " " .. shell_quote(entry.value))
     end
     return run_helper(table.concat(parts, " "))
+end
+
+local function helper_call_async(command, options)
+    local parts = { command }
+    for _, entry in ipairs(options or {}) do
+        table.insert(parts, entry.flag .. " " .. shell_quote(entry.value))
+    end
+    return run_helper_async(table.concat(parts, " "))
 end
 
 local function require_devices()
@@ -376,7 +395,7 @@ local function onoff_ui(display_handle, command_name)
         end
         return
     end
-    local payload = helper_call(command_name, {
+    local payload = helper_call_async(command_name, {
         { flag = "--device", value = device.id },
     })
     if not payload.ok then
@@ -412,7 +431,7 @@ local function rgb_ui(display_handle)
         return
     end
 
-    local payload = helper_call("rgb", {
+    local payload = helper_call_async("rgb", {
         { flag = "--device", value = device.id },
         { flag = "--r", value = result.inputs["R"] or "0" },
         { flag = "--g", value = result.inputs["G"] or "0" },
@@ -450,7 +469,7 @@ local function white_ui(display_handle)
         return
     end
 
-    local payload = helper_call("white", {
+    local payload = helper_call_async("white", {
         { flag = "--device", value = device.id },
         { flag = "--brightness", value = result.inputs["Brightness"] or "100" },
         { flag = "--temp", value = result.inputs["Temp"] or "0" },
@@ -560,7 +579,7 @@ local function handle_cli(display_handle, arguments)
         if selector and selector ~= "" then
             table.insert(options, { flag = "--device", value = selector })
         end
-        local payload = helper_call(command, options)
+        local payload = command == "status" and helper_call(command, options) or helper_call_async(command, options)
         if not payload.ok then
             show_error(payload.message)
         elseif command == "status" then
@@ -585,7 +604,7 @@ local function handle_cli(display_handle, arguments)
         if selector and selector ~= "" then
             table.insert(options, 1, { flag = "--device", value = selector })
         end
-        local payload = helper_call("rgb", options)
+        local payload = helper_call_async("rgb", options)
         if not payload.ok then
             show_error(payload.message)
         else
@@ -602,7 +621,7 @@ local function handle_cli(display_handle, arguments)
         if selector and selector ~= "" then
             table.insert(options, 1, { flag = "--device", value = selector })
         end
-        local payload = helper_call("white", options)
+        local payload = helper_call_async("white", options)
         if not payload.ok then
             show_error(payload.message)
         else
