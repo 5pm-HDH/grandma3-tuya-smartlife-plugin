@@ -1,33 +1,60 @@
 #!/usr/bin/env python3
-"""TinyTuya-backed helper for the grandMA3 SmartLife RGB plugin."""
+"""TinyTuya-backed helper and local HTTP server for the grandMA3 SmartLife RGB plugin."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import queue
 import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 VERSION_CANDIDATES = ("3.4", "3.3", "3.5", "3.1")
+ASYNC_COMMANDS = {"on", "off", "rgb", "white"}
+DEFAULT_SERVER_HOST = "127.0.0.1"
+DEFAULT_SERVER_PORT = 9123
 
 
-def response(ok: bool, message: str, **extra: Any) -> int:
-    payload = {"ok": ok, "message": message}
+def ok_payload(message: str, **extra: Any) -> dict[str, Any]:
+    payload = {"ok": True, "message": message}
     payload.update(extra)
+    return payload
+
+
+def error_payload(message: str, **extra: Any) -> dict[str, Any]:
+    payload = {"ok": False, "message": message}
+    payload.update(extra)
+    return payload
+
+
+def print_payload(payload: dict[str, Any]) -> int:
     print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0 if ok else 1
+    return 0 if payload.get("ok") else 1
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"settings": {"python": "python3"}, "devices": [], "active_device": None}
+        return {
+            "settings": {
+                "python": "python3",
+                "server_host": DEFAULT_SERVER_HOST,
+                "server_port": DEFAULT_SERVER_PORT,
+            },
+            "devices": [],
+            "active_device": None,
+        }
     with path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
     if not isinstance(data, dict):
         raise ValueError("Config file must contain a JSON object")
     data.setdefault("settings", {})
     data["settings"].setdefault("python", "python3")
+    data["settings"].setdefault("server_host", DEFAULT_SERVER_HOST)
+    data["settings"].setdefault("server_port", DEFAULT_SERVER_PORT)
     data.setdefault("devices", [])
     data.setdefault("active_device", None)
     return data
@@ -179,55 +206,42 @@ def resolve_bulb(config_path: Path, config: dict[str, Any], selector: str | None
     )
 
 
-def ensure_ok_result(result: Any, action: str) -> Any:
-    if is_error_payload(result):
-        raise RuntimeError(f"{action} failed: {result}")
-    return result
-
-
 def execute_with_version_fallback(config_path: Path, config: dict[str, Any], selector: str | None, action_name: str, fn):
     device = find_device(config, selector)
-    versions = ordered_versions_for(device)
     last_error = None
-
-    for index, version in enumerate(versions):
+    for version in ordered_versions_for(device):
         bulb = make_bulb(device, version=version)
         result = fn(bulb)
         if not is_error_payload(result):
             remember_version(config_path, config, device, version)
             return device, bulb, result
-
         last_error = result
-        if index == 0:
-            continue
 
     raise RuntimeError(
         f"{action_name} failed for {device['name']} at {device['ip']}: {last_error}"
     )
 
 
-def command_list(config: dict[str, Any]) -> int:
-    return response(
-        True,
+def command_list(config: dict[str, Any]) -> dict[str, Any]:
+    return ok_payload(
         f"{len(config['devices'])} device(s) configured",
         active_device=config.get("active_device"),
         devices=config["devices"],
     )
 
 
-def command_import_snapshot(config_path: Path, config: dict[str, Any], snapshot_path: str) -> int:
+def command_import_snapshot(config_path: Path, config: dict[str, Any], snapshot_path: str) -> dict[str, Any]:
     path = Path(snapshot_path).expanduser()
     with path.open("r", encoding="utf-8") as handle:
         snapshot = json.load(handle)
     imported = dedupe_devices(walk_snapshot(snapshot))
     if not imported:
-        return response(False, f"No devices with id/key/ip were found in {path}")
+        return error_payload(f"No devices with id/key/ip were found in {path}")
     config["devices"] = imported
     if not config.get("active_device") or not any(d["id"] == config["active_device"] for d in imported):
         config["active_device"] = imported[0]["id"]
     save_json_file(config_path, config)
-    return response(
-        True,
+    return ok_payload(
         f"Imported {len(imported)} device(s) from {path}",
         active_device=config["active_device"],
         devices=imported,
@@ -242,7 +256,7 @@ def command_add_manual(
     key: str,
     ip: str,
     version: str,
-) -> int:
+) -> dict[str, Any]:
     device = {
         "name": name,
         "id": device_id,
@@ -255,27 +269,26 @@ def command_add_manual(
     config["devices"] = dedupe_devices(existing)
     config["active_device"] = device_id
     save_json_file(config_path, config)
-    return response(True, f"Saved device {name}", active_device=device_id, device=device)
+    return ok_payload(f"Saved device {name}", active_device=device_id, device=device)
 
 
-def command_select(config_path: Path, config: dict[str, Any], selector: str) -> int:
+def command_select(config_path: Path, config: dict[str, Any], selector: str) -> dict[str, Any]:
     device = find_device(config, selector)
     config["active_device"] = device["id"]
     save_json_file(config_path, config)
-    return response(True, f"Selected {device['name']}", active_device=device["id"], device=device)
+    return ok_payload(f"Selected {device['name']}", active_device=device["id"], device=device)
 
 
-def command_status(config_path: Path, config: dict[str, Any], selector: str | None) -> int:
+def command_status(config_path: Path, config: dict[str, Any], selector: str | None) -> dict[str, Any]:
     device, bulb, raw_status = resolve_bulb(config_path, config, selector)
-    state: dict[str, Any] | None = None
     try:
         state = bulb.state()
     except Exception:
         state = None
-    return response(True, f"Fetched status for {device['name']}", device=device, status=raw_status, state=state)
+    return ok_payload(f"Fetched status for {device['name']}", device=device, status=raw_status, state=state)
 
 
-def command_onoff(config_path: Path, config: dict[str, Any], selector: str | None, turn_on: bool) -> int:
+def command_onoff(config_path: Path, config: dict[str, Any], selector: str | None, turn_on: bool) -> dict[str, Any]:
     if turn_on:
         device, _, result = execute_with_version_fallback(
             config_path, config, selector, "turn_on", lambda bulb: bulb.turn_on()
@@ -286,10 +299,10 @@ def command_onoff(config_path: Path, config: dict[str, Any], selector: str | Non
             config_path, config, selector, "turn_off", lambda bulb: bulb.turn_off()
         )
         message = f"Turned off {device['name']}"
-    return response(True, message, device=device, result=result)
+    return ok_payload(message, device=device, result=result)
 
 
-def command_rgb(config_path: Path, config: dict[str, Any], selector: str | None, r: int, g: int, b: int) -> int:
+def command_rgb(config_path: Path, config: dict[str, Any], selector: str | None, r: int, g: int, b: int) -> dict[str, Any]:
     def apply_rgb(bulb):
         result = bulb.turn_on()
         if is_error_payload(result):
@@ -299,12 +312,12 @@ def command_rgb(config_path: Path, config: dict[str, Any], selector: str | None,
     device, _, result = execute_with_version_fallback(
         config_path, config, selector, "set_colour", apply_rgb
     )
-    return response(True, f"Set {device['name']} to rgb({r}, {g}, {b})", device=device, result=result)
+    return ok_payload(f"Set {device['name']} to rgb({r}, {g}, {b})", device=device, result=result)
 
 
 def command_white(
     config_path: Path, config: dict[str, Any], selector: str | None, brightness: int, colourtemp: int
-) -> int:
+) -> dict[str, Any]:
     def apply_white(bulb):
         result = bulb.turn_on()
         if is_error_payload(result):
@@ -314,18 +327,153 @@ def command_white(
     device, _, result = execute_with_version_fallback(
         config_path, config, selector, "set_white_percentage", apply_white
     )
-    return response(
-        True,
+    return ok_payload(
         f"Set {device['name']} white brightness={brightness}% temp={colourtemp}%",
         device=device,
         result=result,
     )
 
 
+def perform_request(config_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    config = load_json_file(config_path)
+    command = str(payload.get("command") or "")
+    if not command:
+        return error_payload("Missing command")
+    if command == "list":
+        return command_list(config)
+    if command == "import_snapshot":
+        return command_import_snapshot(config_path, config, str(payload["path"]))
+    if command == "add_manual":
+        return command_add_manual(
+            config_path,
+            config,
+            str(payload["name"]),
+            str(payload["id"]),
+            str(payload["key"]),
+            str(payload["ip"]),
+            str(payload.get("version", "3.3")),
+        )
+    if command == "select":
+        return command_select(config_path, config, str(payload["device"]))
+    if command == "status":
+        return command_status(config_path, config, payload.get("device"))
+    if command == "on":
+        return command_onoff(config_path, config, payload.get("device"), True)
+    if command == "off":
+        return command_onoff(config_path, config, payload.get("device"), False)
+    if command == "rgb":
+        return command_rgb(config_path, config, payload.get("device"), int(payload["r"]), int(payload["g"]), int(payload["b"]))
+    if command == "white":
+        return command_white(
+            config_path,
+            config,
+            payload.get("device"),
+            int(payload["brightness"]),
+            int(payload["temp"]),
+        )
+    return error_payload(f"Unknown command: {command}")
+
+
+class BridgeApp:
+    def __init__(self, config_path: Path, log_path: Path):
+        self.config_path = config_path
+        self.log_path = log_path
+        self.lock = threading.Lock()
+        self.action_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.worker = threading.Thread(target=self.worker_loop, daemon=True, name="smartlife-bridge-worker")
+        self.worker.start()
+
+    def log(self, message: str) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {message}\n")
+
+    def dispatch(self, payload: dict[str, Any], allow_async: bool = True) -> tuple[int, dict[str, Any]]:
+        command = str(payload.get("command") or "")
+        if allow_async and command in ASYNC_COMMANDS:
+            self.action_queue.put(dict(payload))
+            return 202, ok_payload("Command queued")
+        with self.lock:
+            try:
+                return 200, perform_request(self.config_path, payload)
+            except Exception as exc:
+                self.log(f"sync error: {exc}")
+                return 500, error_payload(str(exc), error_type=exc.__class__.__name__)
+
+    def worker_loop(self) -> None:
+        while True:
+            payload = self.action_queue.get()
+            try:
+                with self.lock:
+                    result = perform_request(self.config_path, payload)
+                if not result.get("ok"):
+                    self.log(f"async failure: {json.dumps(result, sort_keys=True)}")
+            except Exception as exc:
+                self.log(f"async exception: {exc}")
+            finally:
+                self.action_queue.task_done()
+
+
+class BridgeHttpServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+    def __init__(self, server_address, handler_cls, app: BridgeApp):
+        super().__init__(server_address, handler_cls)
+        self.app = app
+
+
+class BridgeHandler(BaseHTTPRequestHandler):
+    server: BridgeHttpServer
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            self.send_json(200, ok_payload("ok"))
+            return
+        self.send_json(404, error_payload("Not found"))
+
+    def do_POST(self) -> None:
+        if self.path != "/dispatch":
+            self.send_json(404, error_payload("Not found"))
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            self.send_json(400, error_payload(f"Invalid JSON: {exc}"))
+            return
+        if not isinstance(payload, dict):
+            self.send_json(400, error_payload("Payload must be a JSON object"))
+            return
+        status, response_payload = self.server.app.dispatch(payload, allow_async=True)
+        self.send_json(status, response_payload)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+    def send_json(self, status_code: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def run_server(config_path: Path, host: str, port: int, log_path: Path) -> int:
+    app = BridgeApp(config_path, log_path)
+    app.log(f"server start {host}:{port}")
+    server = BridgeHttpServer((host, port), BridgeHandler, app)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        app.log("server stop")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SmartLife RGB helper for grandMA3")
     parser.add_argument("--config", required=True, help="Path to plugin config JSON")
-    parser.add_argument("--request-file", help="Path to JSON request file")
 
     subparsers = parser.add_subparsers(dest="command", required=False)
     subparsers.add_parser("list")
@@ -363,82 +511,43 @@ def build_parser() -> argparse.ArgumentParser:
     white.add_argument("--brightness", type=int, required=True)
     white.add_argument("--temp", type=int, required=True)
 
+    serve = subparsers.add_parser("serve")
+    serve.add_argument("--host", default=DEFAULT_SERVER_HOST)
+    serve.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT)
+    serve.add_argument("--log-path")
+
     return parser
 
 
-def dispatch_request(config_path: Path, config: dict[str, Any], command: str, payload: dict[str, Any]) -> int:
-    if command == "list":
-        return command_list(config)
-    if command == "import-snapshot":
-        return command_import_snapshot(config_path, config, str(payload["path"]))
-    if command == "add-manual":
-        return command_add_manual(
-            config_path,
-            config,
-            str(payload["name"]),
-            str(payload["id"]),
-            str(payload["key"]),
-            str(payload["ip"]),
-            str(payload.get("version", "3.3")),
-        )
-    if command == "select":
-        return command_select(config_path, config, str(payload["device"]))
-    if command == "status":
-        return command_status(config_path, config, payload.get("device"))
-    if command == "on":
-        return command_onoff(config_path, config, payload.get("device"), True)
-    if command == "off":
-        return command_onoff(config_path, config, payload.get("device"), False)
-    if command == "rgb":
-        return command_rgb(
-            config_path,
-            config,
-            payload.get("device"),
-            int(payload["r"]),
-            int(payload["g"]),
-            int(payload["b"]),
-        )
-    if command == "white":
-        return command_white(
-            config_path,
-            config,
-            payload.get("device"),
-            int(payload["brightness"]),
-            int(payload["temp"]),
-        )
-    return response(False, f"Unknown command: {command}")
+def request_payload_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.command:
+        return {}
+    payload: dict[str, Any] = {"command": args.command}
+    for key, value in vars(args).items():
+        if key in {"config", "command", "host", "port", "log_path"}:
+            continue
+        if value is not None:
+            payload[key] = value
+    return payload
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     config_path = Path(args.config).expanduser()
-    request_path: Path | None = None
+
+    if args.command == "serve":
+        log_path = Path(args.log_path).expanduser() if args.log_path else config_path.with_name("smartlife_bridge_server.log")
+        return run_server(config_path, args.host, args.port, log_path)
+
+    payload = request_payload_from_args(args)
+    if not payload.get("command"):
+        return print_payload(error_payload("No command provided"))
 
     try:
-        config = load_json_file(config_path)
-        if args.request_file:
-            request_path = Path(args.request_file).expanduser()
-            request = json.loads(request_path.read_text(encoding="utf-8"))
-            if not isinstance(request, dict):
-                return response(False, "Request file must contain a JSON object")
-            command = request.get("command")
-            if not command:
-                return response(False, "Request file is missing command")
-            return dispatch_request(config_path, config, str(command), request)
-
-        command = args.command
-        if not command:
-            return response(False, "No command provided")
-        return dispatch_request(config_path, config, command, vars(args))
+        return print_payload(perform_request(config_path, payload))
     except Exception as exc:
-        return response(False, str(exc), error_type=exc.__class__.__name__)
-    finally:
-        if request_path is not None:
-            try:
-                request_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+        return print_payload(error_payload(str(exc), error_type=exc.__class__.__name__))
 
 
 if __name__ == "__main__":

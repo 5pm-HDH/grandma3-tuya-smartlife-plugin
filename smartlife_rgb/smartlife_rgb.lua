@@ -4,6 +4,9 @@ local signalTable = select(3, ...)
 local my_handle = select(4, ...)
 
 local json = require("json")
+local http = require("http")
+local ltn12 = require("ltn12")
+
 local HOST_OS = string.lower(tostring(HostOS() or ""))
 local IS_WINDOWS = string.find(HOST_OS, "windows", 1, true) ~= nil
 local PATH_SEP = IS_WINDOWS and "\\" or "/"
@@ -34,8 +37,8 @@ end
 local PLUGIN_DIR = detect_plugin_dir()
 local CONFIG_PATH = join_path(PLUGIN_DIR, "smartlife_rgb_config.json")
 local BRIDGE_PATH = join_path(PLUGIN_DIR, "smartlife_bridge.py")
-local ASYNC_LOG_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_async.log")
 local DEBUG_LOG_PATH = join_path(PLUGIN_DIR, "smartlife_rgb_debug.log")
+local SERVER_LOG_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_server.log")
 
 local function ensure_plugin_dir()
     CreateDirectoryRecursive(PLUGIN_DIR)
@@ -67,16 +70,15 @@ local function append_debug_log(message)
     handle:close()
 end
 
-local function make_unique_path(prefix, extension)
-    local suffix = tostring(os.time()) .. "_" .. tostring(math.floor(os.clock() * 1000000))
-    return join_path(PLUGIN_DIR, prefix .. "_" .. suffix .. extension)
-end
-
 local function load_config()
     ensure_plugin_dir()
     if not file_exists(CONFIG_PATH) then
         return {
-            settings = { python = "python3" },
+            settings = {
+                python = "python3",
+                server_host = "127.0.0.1",
+                server_port = 9123,
+            },
             devices = {},
             active_device = nil,
         }
@@ -84,7 +86,11 @@ local function load_config()
     local content = read_file(CONFIG_PATH)
     if not content or content == "" then
         return {
-            settings = { python = "python3" },
+            settings = {
+                python = "python3",
+                server_host = "127.0.0.1",
+                server_port = 9123,
+            },
             devices = {},
             active_device = nil,
         }
@@ -93,7 +99,11 @@ local function load_config()
     if not ok or type(data) ~= "table" then
         ErrEcho("SmartLife RGB: invalid config JSON, resetting defaults")
         return {
-            settings = { python = "python3" },
+            settings = {
+                python = "python3",
+                server_host = "127.0.0.1",
+                server_port = 9123,
+            },
             devices = {},
             active_device = nil,
         }
@@ -101,6 +111,12 @@ local function load_config()
     data.settings = data.settings or {}
     if not data.settings.python or data.settings.python == "" then
         data.settings.python = "python3"
+    end
+    if not data.settings.server_host or data.settings.server_host == "" then
+        data.settings.server_host = "127.0.0.1"
+    end
+    if not data.settings.server_port or tonumber(data.settings.server_port) == nil then
+        data.settings.server_port = 9123
     end
     data.devices = data.devices or {}
     return data
@@ -188,36 +204,6 @@ local function parse_cli_string(input)
     return command, params
 end
 
-local function build_helper_command(args, output_path)
-    local config = load_config()
-    local python_path = config.settings.python or "python3"
-    return shell_quote(python_path)
-        .. " "
-        .. shell_quote(BRIDGE_PATH)
-        .. " --config "
-        .. shell_quote(CONFIG_PATH)
-        .. " "
-        .. args
-        .. " > "
-        .. shell_quote(output_path)
-        .. " 2>&1"
-end
-
-local function build_helper_request_command(request_path, output_path)
-    local config = load_config()
-    local python_path = config.settings.python or "python3"
-    return shell_quote(python_path)
-        .. " "
-        .. shell_quote(BRIDGE_PATH)
-        .. " --config "
-        .. shell_quote(CONFIG_PATH)
-        .. " --request-file "
-        .. shell_quote(request_path)
-        .. " > "
-        .. shell_quote(output_path)
-        .. " 2>&1"
-end
-
 local function run_shell_command(command, is_async)
     if IS_WINDOWS then
         if is_async then
@@ -242,85 +228,142 @@ local function run_shell_command(command, is_async)
     end
 end
 
-local function run_helper(args)
-    local result_path = make_unique_path("smartlife_bridge_result", ".json")
-    local command = build_helper_command(args, result_path)
-    append_debug_log("sync exec: " .. command)
-
-    os.remove(result_path)
-    run_shell_command(command, false)
-
-    local raw = read_file(result_path)
-    if not raw or raw == "" then
-        append_debug_log("sync result missing or empty: " .. result_path)
-        return { ok = false, message = "Helper produced no output" }
-    end
-
-    local ok, payload = pcall(json.decode, raw)
-    if not ok or type(payload) ~= "table" then
-        append_debug_log("sync result parse failed: " .. raw)
-        return { ok = false, message = raw }
-    end
-    append_debug_log("sync result ok")
-    os.remove(result_path)
-    return payload
+local function get_server_settings()
+    local config = load_config()
+    return tostring(config.settings.server_host or "127.0.0.1"), tonumber(config.settings.server_port) or 9123
 end
 
-local function run_helper_async(args)
-    local command = build_helper_command(args, ASYNC_LOG_PATH)
-    append_debug_log("async exec: " .. command)
+local function build_server_url(path)
+    local host, port = get_server_settings()
+    return "http://" .. host .. ":" .. tostring(port) .. path
+end
+
+local function build_server_start_command()
+    local config = load_config()
+    local python_path = config.settings.python or "python3"
+    local server_host = tostring(config.settings.server_host or "127.0.0.1")
+    local server_port = tostring(config.settings.server_port or 9123)
+    return shell_quote(python_path)
+        .. " "
+        .. shell_quote(BRIDGE_PATH)
+        .. " --config "
+        .. shell_quote(CONFIG_PATH)
+        .. " serve --host "
+        .. shell_quote(server_host)
+        .. " --port "
+        .. shell_quote(server_port)
+        .. " --log-path "
+        .. shell_quote(SERVER_LOG_PATH)
+        .. " > "
+        .. shell_quote(SERVER_LOG_PATH)
+        .. " 2>&1"
+end
+
+local function http_json_request(method, path, payload, timeout)
+    local body = payload and json.encode(payload) or ""
+    local response_chunks = {}
+    local headers = {
+        ["Accept"] = "application/json",
+    }
+    local source = nil
+    if method ~= "GET" then
+        headers["Content-type"] = "application/json"
+        headers["Content-length"] = tostring(string.len(body))
+        source = ltn12.source.string(body)
+    end
+
+    local old_timeout = http.TIMEOUT
+    http.TIMEOUT = timeout or 1
+    local ok, req_ok, code = pcall(http.request, {
+        url = build_server_url(path),
+        method = method,
+        headers = headers,
+        source = source,
+        sink = ltn12.sink.table(response_chunks),
+    })
+    http.TIMEOUT = old_timeout
+
+    if not ok then
+        return { ok = false, message = tostring(req_ok) }
+    end
+
+    local status_code = tonumber(code) or 0
+    local raw = table.concat(response_chunks)
+    if not req_ok and raw == "" then
+        return { ok = false, message = "Server request failed", status_code = status_code }
+    end
+    if raw == "" then
+        return { ok = false, message = "Server returned empty response", status_code = status_code }
+    end
+
+    local ok_json, response_payload = pcall(json.decode, raw)
+    if not ok_json or type(response_payload) ~= "table" then
+        return { ok = false, message = raw, status_code = status_code }
+    end
+    response_payload.status_code = status_code
+    return response_payload
+end
+
+local function sleep_short(seconds)
+    pcall(coroutine.yield, seconds)
+end
+
+local function server_is_healthy(timeout)
+    local payload = http_json_request("GET", "/health", nil, timeout or 0.15)
+    return payload and payload.ok == true
+end
+
+local function ensure_server_running()
+    if server_is_healthy(0.15) then
+        return true
+    end
+
+    local command = build_server_start_command()
+    append_debug_log("start server: " .. command)
     run_shell_command(command, true)
-    return { ok = true, message = "Command dispatched" }
+
+    for _ = 1, 20 do
+        sleep_short(0.1)
+        if server_is_healthy(0.15) then
+            return true
+        end
+    end
+
+    return false
 end
 
-local function run_helper_request(request, async_mode)
-    local request_path = make_unique_path("smartlife_bridge_request", ".json")
-    write_file(request_path, json.encode(request))
-    local output_path = async_mode and ASYNC_LOG_PATH or make_unique_path("smartlife_bridge_result", ".json")
-    local command = build_helper_request_command(request_path, output_path)
-    append_debug_log((async_mode and "async" or "sync") .. " request exec: " .. command)
-
-    if async_mode then
-        run_shell_command(command, true)
-        return { ok = true, message = "Command dispatched" }
+local function request_timeout_for(command)
+    if command == "list" or command == "status" or command == "import_snapshot" or command == "add_manual" or command == "select" then
+        return 2
     end
+    return 0.5
+end
 
-    os.remove(output_path)
-    run_shell_command(command, false)
-
-    local raw = read_file(output_path)
-    if not raw or raw == "" then
-        append_debug_log("sync request result missing or empty: " .. output_path)
-        return { ok = false, message = "Helper produced no output" }
+local function make_request(command, options)
+    local request = { command = command }
+    for _, entry in ipairs(options or {}) do
+        local key = string.gsub(entry.flag, "^%-%-", "")
+        request[key] = entry.value
     end
-
-    local ok, payload = pcall(json.decode, raw)
-    if not ok or type(payload) ~= "table" then
-        append_debug_log("sync request result parse failed: " .. raw)
-        return { ok = false, message = raw }
-    end
-    append_debug_log("sync request result ok")
-    os.remove(output_path)
-    os.remove(request_path)
-    return payload
+    return request
 end
 
 local function helper_call(command, options)
-    local request = { command = command }
-    for _, entry in ipairs(options or {}) do
-        local key = string.gsub(entry.flag, "^%-%-", "")
-        request[key] = entry.value
+    if not ensure_server_running() then
+        return { ok = false, message = "SmartLife server failed to start" }
     end
-    return run_helper_request(request, false)
+    local request = make_request(command, options)
+    append_debug_log("http sync dispatch: " .. json.encode(request))
+    return http_json_request("POST", "/dispatch", request, request_timeout_for(command))
 end
 
 local function helper_call_async(command, options)
-    local request = { command = command }
-    for _, entry in ipairs(options or {}) do
-        local key = string.gsub(entry.flag, "^%-%-", "")
-        request[key] = entry.value
+    if not ensure_server_running() then
+        return { ok = false, message = "SmartLife server failed to start" }
     end
-    return run_helper_request(request, true)
+    local request = make_request(command, options)
+    append_debug_log("http async dispatch: " .. json.encode(request))
+    return http_json_request("POST", "/dispatch", request, 0.5)
 end
 
 local function require_devices()
@@ -380,7 +423,7 @@ local function import_snapshot_ui()
     if not path or path == "" then
         return
     end
-    local payload = helper_call("import-snapshot", {
+    local payload = helper_call("import_snapshot", {
         { flag = "--path", value = path },
     })
     if not payload.ok then
@@ -411,7 +454,7 @@ local function add_manual_ui()
         return
     end
 
-    local payload = helper_call("add-manual", {
+    local payload = helper_call("add_manual", {
         { flag = "--name", value = result.inputs["Name"] or "" },
         { flag = "--ip", value = result.inputs["IP"] or "" },
         { flag = "--id", value = result.inputs["Device ID"] or "" },
@@ -634,7 +677,7 @@ local function handle_cli(display_handle, arguments)
             show_error("Missing path=...")
             return true
         end
-        local payload = helper_call("import-snapshot", {
+        local payload = helper_call("import_snapshot", {
             { flag = "--path", value = params.path },
         })
         if not payload.ok then
@@ -645,7 +688,7 @@ local function handle_cli(display_handle, arguments)
         return true
     end
     if command == "add_manual" then
-        local payload = helper_call("add-manual", {
+        local payload = helper_call("add_manual", {
             { flag = "--name", value = params.name or "" },
             { flag = "--ip", value = params.ip or "" },
             { flag = "--id", value = params.id or "" },

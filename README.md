@@ -2,6 +2,8 @@
 
 This repository contains a grandMA3 onPC plugin that controls Tuya/SmartLife WiFi RGB controllers over LAN by calling a local Python helper built on top of [TinyTuya](https://github.com/jasonacox/tinytuya).
 
+The Lua plugin talks to a small local Python HTTP server on `127.0.0.1`, which avoids shell quoting issues across macOS and Windows and keeps live action commands responsive.
+
 The plugin supports two setup paths:
 
 - import a prebuilt TinyTuya `snapshot.json`
