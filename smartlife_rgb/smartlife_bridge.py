@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -471,6 +472,50 @@ def run_server(config_path: Path, host: str, port: int, log_path: Path) -> int:
     return 0
 
 
+def spawn_server(config_path: Path, host: str, port: int, log_path: Path) -> dict[str, Any]:
+    script_path = Path(__file__).resolve()
+    python_path = Path(sys.executable).resolve()
+    command = [
+        str(python_path),
+        str(script_path),
+        "--config",
+        str(config_path),
+        "serve",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--log-path",
+        str(log_path),
+    ]
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_handle = log_path.open("a", encoding="utf-8")
+    stderr_handle = stdout_handle
+
+    kwargs: dict[str, Any] = {
+        "stdout": stdout_handle,
+        "stderr": stderr_handle,
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        creationflags = 0
+        creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        kwargs["creationflags"] = creationflags
+    else:
+        kwargs["start_new_session"] = True
+
+    try:
+        process = subprocess.Popen(command, **kwargs)
+    finally:
+        stdout_handle.close()
+
+    return ok_payload("Server spawned", pid=process.pid, host=host, port=port)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SmartLife RGB helper for grandMA3")
     parser.add_argument("--config", required=True, help="Path to plugin config JSON")
@@ -516,6 +561,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT)
     serve.add_argument("--log-path")
 
+    spawn = subparsers.add_parser("spawn-server")
+    spawn.add_argument("--host", default=DEFAULT_SERVER_HOST)
+    spawn.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT)
+    spawn.add_argument("--log-path")
+
     return parser
 
 
@@ -539,6 +589,9 @@ def main() -> int:
     if args.command == "serve":
         log_path = Path(args.log_path).expanduser() if args.log_path else config_path.with_name("smartlife_bridge_server.log")
         return run_server(config_path, args.host, args.port, log_path)
+    if args.command == "spawn-server":
+        log_path = Path(args.log_path).expanduser() if args.log_path else config_path.with_name("smartlife_bridge_server.log")
+        return print_payload(spawn_server(config_path, args.host, args.port, log_path))
 
     payload = request_payload_from_args(args)
     if not payload.get("command"):

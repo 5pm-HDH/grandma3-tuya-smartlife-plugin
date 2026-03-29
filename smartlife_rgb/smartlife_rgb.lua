@@ -137,6 +137,18 @@ local function shell_quote(value)
     return "'" .. text .. "'"
 end
 
+local function server_python_path()
+    local config = load_config()
+    local python_path = tostring(config.settings.python or "python3")
+    if IS_WINDOWS then
+        local pythonw_path = string.gsub(python_path, "python%.exe$", "pythonw.exe")
+        if pythonw_path ~= python_path and file_exists(pythonw_path) then
+            return pythonw_path
+        end
+    end
+    return python_path
+end
+
 local function show_message(title, message)
     MessageBox({
         title = title,
@@ -228,6 +240,15 @@ local function run_shell_command(command, is_async)
     end
 end
 
+local function run_server_start_command(command)
+    if IS_WINDOWS then
+        append_debug_log("shell server-start windows direct: " .. command)
+        os.execute(command)
+        return
+    end
+    run_shell_command(command, false)
+end
+
 local function get_server_settings()
     local config = load_config()
     return tostring(config.settings.server_host or "127.0.0.1"), tonumber(config.settings.server_port) or 9123
@@ -240,7 +261,7 @@ end
 
 local function build_server_start_command()
     local config = load_config()
-    local python_path = config.settings.python or "python3"
+    local python_path = server_python_path()
     local server_host = tostring(config.settings.server_host or "127.0.0.1")
     local server_port = tostring(config.settings.server_port or 9123)
     return shell_quote(python_path)
@@ -248,15 +269,12 @@ local function build_server_start_command()
         .. shell_quote(BRIDGE_PATH)
         .. " --config "
         .. shell_quote(CONFIG_PATH)
-        .. " serve --host "
+        .. " spawn-server --host "
         .. shell_quote(server_host)
         .. " --port "
         .. shell_quote(server_port)
         .. " --log-path "
         .. shell_quote(SERVER_LOG_PATH)
-        .. " > "
-        .. shell_quote(SERVER_LOG_PATH)
-        .. " 2>&1"
 end
 
 local function http_json_request(method, path, payload, timeout)
@@ -320,11 +338,11 @@ local function ensure_server_running()
 
     local command = build_server_start_command()
     append_debug_log("start server: " .. command)
-    run_shell_command(command, true)
+    run_server_start_command(command)
 
-    for _ = 1, 20 do
+    for _ = 1, 50 do
         sleep_short(0.1)
-        if server_is_healthy(0.15) then
+        if server_is_healthy(0.2) then
             return true
         end
     end
