@@ -350,6 +350,23 @@ local function ensure_server_running()
     return false
 end
 
+local function dispatch_request(command, request, timeout, mode_label)
+    append_debug_log("http " .. mode_label .. " dispatch: " .. json.encode(request))
+    local payload = http_json_request("POST", "/dispatch", request, timeout)
+    local status_code = tonumber(payload and payload.status_code) or 0
+    if status_code ~= 0 then
+        return payload
+    end
+
+    append_debug_log("http " .. mode_label .. " dispatch failed before health check: " .. tostring(payload and payload.message or "unknown error"))
+    if not ensure_server_running() then
+        return { ok = false, message = "SmartLife server failed to start" }
+    end
+
+    append_debug_log("http " .. mode_label .. " dispatch retry: " .. json.encode(request))
+    return http_json_request("POST", "/dispatch", request, timeout)
+end
+
 local function request_timeout_for(command)
     if command == "list" or command == "status" or command == "import_snapshot" or command == "add_manual" or command == "select" then
         return 2
@@ -367,21 +384,13 @@ local function make_request(command, options)
 end
 
 local function helper_call(command, options)
-    if not ensure_server_running() then
-        return { ok = false, message = "SmartLife server failed to start" }
-    end
     local request = make_request(command, options)
-    append_debug_log("http sync dispatch: " .. json.encode(request))
-    return http_json_request("POST", "/dispatch", request, request_timeout_for(command))
+    return dispatch_request(command, request, request_timeout_for(command), "sync")
 end
 
 local function helper_call_async(command, options)
-    if not ensure_server_running() then
-        return { ok = false, message = "SmartLife server failed to start" }
-    end
     local request = make_request(command, options)
-    append_debug_log("http async dispatch: " .. json.encode(request))
-    return http_json_request("POST", "/dispatch", request, 0.5)
+    return dispatch_request(command, request, 0.5, "async")
 end
 
 local function require_devices()
