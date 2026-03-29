@@ -4,9 +4,12 @@ local signalTable = select(3, ...)
 local my_handle = select(4, ...)
 
 local json = require("json")
+local HOST_OS = string.lower(tostring(HostOS() or ""))
+local IS_WINDOWS = string.find(HOST_OS, "windows", 1, true) ~= nil
+local PATH_SEP = IS_WINDOWS and "\\" or "/"
 
 local function join_path(base, leaf)
-    return tostring(base) .. "/" .. tostring(leaf)
+    return tostring(base) .. PATH_SEP .. tostring(leaf)
 end
 
 local function file_exists(path)
@@ -33,6 +36,8 @@ local CONFIG_PATH = join_path(PLUGIN_DIR, "smartlife_rgb_config.json")
 local BRIDGE_PATH = join_path(PLUGIN_DIR, "smartlife_bridge.py")
 local RESULT_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_result.json")
 local ASYNC_LOG_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_async.log")
+local DEBUG_LOG_PATH = join_path(PLUGIN_DIR, "smartlife_rgb_debug.log")
+local REQUEST_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_request.json")
 
 local function ensure_plugin_dir()
     CreateDirectoryRecursive(PLUGIN_DIR)
@@ -51,6 +56,16 @@ end
 local function write_file(path, content)
     local handle = assert(io.open(path, "w"))
     handle:write(content)
+    handle:close()
+end
+
+local function append_debug_log(message)
+    ensure_plugin_dir()
+    local handle = io.open(DEBUG_LOG_PATH, "a")
+    if not handle then
+        return
+    end
+    handle:write(os.date("%Y-%m-%d %H:%M:%S") .. " | " .. tostring(message) .. "\n")
     handle:close()
 end
 
@@ -95,6 +110,10 @@ end
 
 local function shell_quote(value)
     local text = tostring(value or "")
+    if IS_WINDOWS then
+        text = string.gsub(text, "\"", "\"\"")
+        return "\"" .. text .. "\""
+    end
     text = string.gsub(text, "'", "'\"'\"'")
     return "'" .. text .. "'"
 end
@@ -181,44 +200,130 @@ local function build_helper_command(args, output_path)
         .. " 2>&1"
 end
 
+local function build_helper_request_command(request_path, output_path)
+    local config = load_config()
+    local python_path = config.settings.python or "python3"
+    return shell_quote(python_path)
+        .. " "
+        .. shell_quote(BRIDGE_PATH)
+        .. " --config "
+        .. shell_quote(CONFIG_PATH)
+        .. " --request-file "
+        .. shell_quote(request_path)
+        .. " > "
+        .. shell_quote(output_path)
+        .. " 2>&1"
+end
+
+local function run_shell_command(command, is_async)
+    if IS_WINDOWS then
+        if is_async then
+            local wrapped = "cmd /c start \"\" /b cmd /c " .. shell_quote(command)
+            append_debug_log("shell async windows: " .. wrapped)
+            os.execute(wrapped)
+        else
+            local wrapped = "cmd /c " .. shell_quote(command)
+            append_debug_log("shell sync windows: " .. wrapped)
+            os.execute(wrapped)
+        end
+        return
+    end
+
+    if is_async then
+        local wrapped = "(" .. command .. ") >/dev/null 2>&1 &"
+        append_debug_log("shell async: " .. wrapped)
+        os.execute(wrapped)
+    else
+        append_debug_log("shell sync: " .. command)
+        os.execute(command)
+    end
+end
+
 local function run_helper(args)
     local command = build_helper_command(args, RESULT_PATH)
+    append_debug_log("sync exec: " .. command)
 
     os.remove(RESULT_PATH)
-    os.execute(command)
+    run_shell_command(command, false)
 
     local raw = read_file(RESULT_PATH)
     if not raw or raw == "" then
+        append_debug_log("sync result missing or empty: " .. RESULT_PATH)
         return { ok = false, message = "Helper produced no output" }
     end
 
     local ok, payload = pcall(json.decode, raw)
     if not ok or type(payload) ~= "table" then
+        append_debug_log("sync result parse failed: " .. raw)
         return { ok = false, message = raw }
     end
+    append_debug_log("sync result ok")
     return payload
 end
 
 local function run_helper_async(args)
     local command = build_helper_command(args, ASYNC_LOG_PATH)
-    os.execute("(" .. command .. ") >/dev/null 2>&1 &")
+    append_debug_log("async exec: " .. command)
+    run_shell_command(command, true)
     return { ok = true, message = "Command dispatched" }
 end
 
-local function helper_call(command, options)
-    local parts = { command }
-    for _, entry in ipairs(options or {}) do
-        table.insert(parts, entry.flag .. " " .. shell_quote(entry.value))
+local function make_request_path(async_mode)
+    if not async_mode then
+        return REQUEST_PATH
     end
-    return run_helper(table.concat(parts, " "))
+    return join_path(
+        PLUGIN_DIR,
+        "smartlife_bridge_request_" .. tostring(os.time()) .. "_" .. tostring(math.floor(os.clock() * 1000000)) .. ".json"
+    )
+end
+
+local function run_helper_request(request, async_mode)
+    local request_path = make_request_path(async_mode)
+    write_file(request_path, json.encode(request))
+    local output_path = async_mode and ASYNC_LOG_PATH or RESULT_PATH
+    local command = build_helper_request_command(request_path, output_path)
+    append_debug_log((async_mode and "async" or "sync") .. " request exec: " .. command)
+
+    if async_mode then
+        run_shell_command(command, true)
+        return { ok = true, message = "Command dispatched" }
+    end
+
+    os.remove(RESULT_PATH)
+    run_shell_command(command, false)
+
+    local raw = read_file(RESULT_PATH)
+    if not raw or raw == "" then
+        append_debug_log("sync request result missing or empty: " .. RESULT_PATH)
+        return { ok = false, message = "Helper produced no output" }
+    end
+
+    local ok, payload = pcall(json.decode, raw)
+    if not ok or type(payload) ~= "table" then
+        append_debug_log("sync request result parse failed: " .. raw)
+        return { ok = false, message = raw }
+    end
+    append_debug_log("sync request result ok")
+    return payload
+end
+
+local function helper_call(command, options)
+    local request = { command = command }
+    for _, entry in ipairs(options or {}) do
+        local key = string.gsub(entry.flag, "^%-%-", "")
+        request[key] = entry.value
+    end
+    return run_helper_request(request, false)
 end
 
 local function helper_call_async(command, options)
-    local parts = { command }
+    local request = { command = command }
     for _, entry in ipairs(options or {}) do
-        table.insert(parts, entry.flag .. " " .. shell_quote(entry.value))
+        local key = string.gsub(entry.flag, "^%-%-", "")
+        request[key] = entry.value
     end
-    return run_helper_async(table.concat(parts, " "))
+    return run_helper_request(request, true)
 end
 
 local function require_devices()

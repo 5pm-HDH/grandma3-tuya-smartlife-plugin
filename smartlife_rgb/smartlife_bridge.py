@@ -325,8 +325,9 @@ def command_white(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SmartLife RGB helper for grandMA3")
     parser.add_argument("--config", required=True, help="Path to plugin config JSON")
+    parser.add_argument("--request-file", help="Path to JSON request file")
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=False)
     subparsers.add_parser("list")
 
     import_snapshot = subparsers.add_parser("import-snapshot")
@@ -365,6 +366,49 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def dispatch_request(config_path: Path, config: dict[str, Any], command: str, payload: dict[str, Any]) -> int:
+    if command == "list":
+        return command_list(config)
+    if command == "import-snapshot":
+        return command_import_snapshot(config_path, config, str(payload["path"]))
+    if command == "add-manual":
+        return command_add_manual(
+            config_path,
+            config,
+            str(payload["name"]),
+            str(payload["id"]),
+            str(payload["key"]),
+            str(payload["ip"]),
+            str(payload.get("version", "3.3")),
+        )
+    if command == "select":
+        return command_select(config_path, config, str(payload["device"]))
+    if command == "status":
+        return command_status(config_path, config, payload.get("device"))
+    if command == "on":
+        return command_onoff(config_path, config, payload.get("device"), True)
+    if command == "off":
+        return command_onoff(config_path, config, payload.get("device"), False)
+    if command == "rgb":
+        return command_rgb(
+            config_path,
+            config,
+            payload.get("device"),
+            int(payload["r"]),
+            int(payload["g"]),
+            int(payload["b"]),
+        )
+    if command == "white":
+        return command_white(
+            config_path,
+            config,
+            payload.get("device"),
+            int(payload["brightness"]),
+            int(payload["temp"]),
+        )
+    return response(False, f"Unknown command: {command}")
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -372,26 +416,20 @@ def main() -> int:
 
     try:
         config = load_json_file(config_path)
+        if args.request_file:
+            request_path = Path(args.request_file).expanduser()
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            if not isinstance(request, dict):
+                return response(False, "Request file must contain a JSON object")
+            command = request.get("command")
+            if not command:
+                return response(False, "Request file is missing command")
+            return dispatch_request(config_path, config, str(command), request)
+
         command = args.command
-        if command == "list":
-            return command_list(config)
-        if command == "import-snapshot":
-            return command_import_snapshot(config_path, config, args.path)
-        if command == "add-manual":
-            return command_add_manual(config_path, config, args.name, args.id, args.key, args.ip, args.version)
-        if command == "select":
-            return command_select(config_path, config, args.device)
-        if command == "status":
-            return command_status(config_path, config, args.device)
-        if command == "on":
-            return command_onoff(config_path, config, args.device, True)
-        if command == "off":
-            return command_onoff(config_path, config, args.device, False)
-        if command == "rgb":
-            return command_rgb(config_path, config, args.device, args.r, args.g, args.b)
-        if command == "white":
-            return command_white(config_path, config, args.device, args.brightness, args.temp)
-        return response(False, f"Unknown command: {command}")
+        if not command:
+            return response(False, "No command provided")
+        return dispatch_request(config_path, config, command, vars(args))
     except Exception as exc:
         return response(False, str(exc), error_type=exc.__class__.__name__)
 
