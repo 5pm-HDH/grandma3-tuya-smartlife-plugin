@@ -34,10 +34,8 @@ end
 local PLUGIN_DIR = detect_plugin_dir()
 local CONFIG_PATH = join_path(PLUGIN_DIR, "smartlife_rgb_config.json")
 local BRIDGE_PATH = join_path(PLUGIN_DIR, "smartlife_bridge.py")
-local RESULT_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_result.json")
 local ASYNC_LOG_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_async.log")
 local DEBUG_LOG_PATH = join_path(PLUGIN_DIR, "smartlife_rgb_debug.log")
-local REQUEST_PATH = join_path(PLUGIN_DIR, "smartlife_bridge_request.json")
 
 local function ensure_plugin_dir()
     CreateDirectoryRecursive(PLUGIN_DIR)
@@ -67,6 +65,11 @@ local function append_debug_log(message)
     end
     handle:write(os.date("%Y-%m-%d %H:%M:%S") .. " | " .. tostring(message) .. "\n")
     handle:close()
+end
+
+local function make_unique_path(prefix, extension)
+    local suffix = tostring(os.time()) .. "_" .. tostring(math.floor(os.clock() * 1000000))
+    return join_path(PLUGIN_DIR, prefix .. "_" .. suffix .. extension)
 end
 
 local function load_config()
@@ -240,15 +243,16 @@ local function run_shell_command(command, is_async)
 end
 
 local function run_helper(args)
-    local command = build_helper_command(args, RESULT_PATH)
+    local result_path = make_unique_path("smartlife_bridge_result", ".json")
+    local command = build_helper_command(args, result_path)
     append_debug_log("sync exec: " .. command)
 
-    os.remove(RESULT_PATH)
+    os.remove(result_path)
     run_shell_command(command, false)
 
-    local raw = read_file(RESULT_PATH)
+    local raw = read_file(result_path)
     if not raw or raw == "" then
-        append_debug_log("sync result missing or empty: " .. RESULT_PATH)
+        append_debug_log("sync result missing or empty: " .. result_path)
         return { ok = false, message = "Helper produced no output" }
     end
 
@@ -258,6 +262,7 @@ local function run_helper(args)
         return { ok = false, message = raw }
     end
     append_debug_log("sync result ok")
+    os.remove(result_path)
     return payload
 end
 
@@ -268,20 +273,10 @@ local function run_helper_async(args)
     return { ok = true, message = "Command dispatched" }
 end
 
-local function make_request_path(async_mode)
-    if not async_mode then
-        return REQUEST_PATH
-    end
-    return join_path(
-        PLUGIN_DIR,
-        "smartlife_bridge_request_" .. tostring(os.time()) .. "_" .. tostring(math.floor(os.clock() * 1000000)) .. ".json"
-    )
-end
-
 local function run_helper_request(request, async_mode)
-    local request_path = make_request_path(async_mode)
+    local request_path = make_unique_path("smartlife_bridge_request", ".json")
     write_file(request_path, json.encode(request))
-    local output_path = async_mode and ASYNC_LOG_PATH or RESULT_PATH
+    local output_path = async_mode and ASYNC_LOG_PATH or make_unique_path("smartlife_bridge_result", ".json")
     local command = build_helper_request_command(request_path, output_path)
     append_debug_log((async_mode and "async" or "sync") .. " request exec: " .. command)
 
@@ -290,12 +285,12 @@ local function run_helper_request(request, async_mode)
         return { ok = true, message = "Command dispatched" }
     end
 
-    os.remove(RESULT_PATH)
+    os.remove(output_path)
     run_shell_command(command, false)
 
-    local raw = read_file(RESULT_PATH)
+    local raw = read_file(output_path)
     if not raw or raw == "" then
-        append_debug_log("sync request result missing or empty: " .. RESULT_PATH)
+        append_debug_log("sync request result missing or empty: " .. output_path)
         return { ok = false, message = "Helper produced no output" }
     end
 
@@ -305,6 +300,8 @@ local function run_helper_request(request, async_mode)
         return { ok = false, message = raw }
     end
     append_debug_log("sync request result ok")
+    os.remove(output_path)
+    os.remove(request_path)
     return payload
 end
 

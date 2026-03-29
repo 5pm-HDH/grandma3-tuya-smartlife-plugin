@@ -413,6 +413,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     config_path = Path(args.config).expanduser()
+    request_path: Path | None = None
 
     try:
         config = load_json_file(config_path)
@@ -432,6 +433,12 @@ def main() -> int:
         return dispatch_request(config_path, config, command, vars(args))
     except Exception as exc:
         return response(False, str(exc), error_type=exc.__class__.__name__)
+    finally:
+        if request_path is not None:
+            try:
+                request_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
